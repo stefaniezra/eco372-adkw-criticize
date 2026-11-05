@@ -1,0 +1,1980 @@
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+      name:  master
+       log:  C:\Users\samosir1\Downloads\ECO372_ADKW_Criticize\ECO372_ADKW_Criticize\output/logs/master_log.txt
+  log type:  text
+ opened on:   5 Nov 2026, 18:26:12
+
+. 
+. di as result "ECO372 Week 8, criticizing side: run started $S_DATE $S_TIME"
+ECO372 Week 8, criticizing side: run started  5 Nov 2026 18:26:12
+
+. di as text "Stata version: " c(stata_version)
+Stata version: 15.1
+
+. 
+. *--------------------------------------------------------------
+. * Settings, helper programs
+. *--------------------------------------------------------------
+. do "code/00_programs.do"
+
+. *==============================================================
+. * 00_programs.do : settings and helper programs
+. *
+. * Defines the paper's settings as globals and three programs:
+. *   rdfit     the paper's regression, with two standard errors
+. *   md_table  writes the data in memory as a Markdown table
+. *   savetab   saves a table as .csv and .md in output/tables
+. *==============================================================
+. version 15
+
+. 
+. *--------------------------------------------------------------
+. * Settings from the paper
+. *--------------------------------------------------------------
+. global CUTOFF 1500     // very low birth weight = strictly below 1,500 g (ADKW fn. 8)
+
+. global WINDOW 85       // ADKW's window: 3 ounces either side of the cutoff
+
+. global OUNCE  28.349523125
+
+. global COST   3795     // ADKW's extra hospital cost per VLBW baby, 2006 dollars (Sec. VIII.B)
+
+. global VSL    2700000  // value of a newborn life near 1,500 g (Cutler and Meara 2000, cited by ADKW)
+
+. 
+. * ADKW's controls (Table I note; Barreca et al. Table I note).
+. * Every control enters as a set of categories, and an unknown
+. * value (coded 99) is its own category, which does the job of
+. * the paper's missing value indicators.
+. global CONTROLS i.year i.mpcb i.mage5 i.meduc4 i.fage5 i.csex ///
+>                 i.gestat i.race3 i.plural i.border
+
+. 
+. * Recorded weights that are whole ounces (50 to 55 oz) inside the window
+. global OUNCE_HEAPS 1417, 1418, 1446, 1474, 1503, 1531, 1559
+
+. 
+. * Figure colours (RGB)
+. global NAVY   "24 72 160"
+
+. global BLUE   "30 82 180"
+
+. global ORANGE "214 119 48"
+
+. global GREY   "163 168 176"
+
+. global DARK   "91 98 112"
+
+. 
+. *--------------------------------------------------------------
+. * rdfit: ADKW's regression (equation 1)
+. *
+. *   outcome = a + b*vlbw + c1*vlbw*x + c2*(1 - vlbw)*x + controls + e
+. *
+. * where x is grams from 1,500 in hundreds, so each side of the
+. * cutoff has its own slope. b is the jump at the cutoff.
+. * Reports b with two standard errors:
+. *   se_r  heteroskedasticity robust (the paper's round brackets)
+. *   se_g  clustered by recorded gram (the paper's square brackets,
+. *         and the only kind Barreca et al. report)
+. *
+. * Usage:  rdfit outcome [if] [aweight], [controls(...) extra(...)]
+. *--------------------------------------------------------------
+. capture program drop rdfit
+
+. program define rdfit, rclass
+  1.     version 15
+  2.     syntax varname(numeric) [if] [aweight] [, CONTROLS(string) EXTRA(string)]
+  3.     local wgt ""
+  4.     if "`weight'" != "" local wgt "[`weight'`exp']"
+  5. 
+.     quietly regress `varlist' vlbw x_below x_above `extra' `controls' `if' `wgt', vce(robust)
+  6.     return scalar b    = _b[vlbw]
+  7.     return scalar se_r = _se[vlbw]
+  8.     return scalar df_r = e(df_r)
+  9.     return scalar N    = e(N)
+ 10. 
+.     quietly regress `varlist' vlbw x_below x_above `extra' `controls' `if' `wgt', vce(cluster grams)
+ 11.     return scalar se_g = _se[vlbw]
+ 12.     return scalar df_g = e(df_r)
+ 13.     return scalar G    = e(N_clust)
+ 14. end
+
+. 
+. *--------------------------------------------------------------
+. * md_table: write variables in memory as a Markdown table.
+. * Uses each variable's label as its column name and each numeric
+. * variable's display format for its cells.
+. *--------------------------------------------------------------
+. capture program drop md_table
+
+. program define md_table
+  1.     version 15
+  2.     syntax varlist using/ [, TITLE(string) NOTE(string)]
+  3.     tempname f
+  4.     file open `f' using `"`using'"', write replace text
+  5.     if `"`title'"' != "" {
+  6.         file write `f' `"## `title'"' _n _n
+  7.     }
+  8.     local head "|"
+  9.     local rule "|"
+ 10.     foreach v of local varlist {
+ 11.         local lab : variable label `v'
+ 12.         if `"`lab'"' == "" local lab "`v'"
+ 13.         local head `"`head' `lab' |"'
+ 14.         local rule "`rule' --- |"
+ 15.     }
+ 16.     file write `f' `"`head'"' _n `"`rule'"' _n
+ 17.     local n = _N
+ 18.     forvalues i = 1/`n' {
+ 19.         local row "|"
+ 20.         foreach v of local varlist {
+ 21.             capture confirm string variable `v'
+ 22.             if _rc == 0 {
+ 23.                 local cell = `v'[`i']
+ 24.             }
+ 25.             else if missing(`v'[`i']) {
+ 26.                 local cell ""
+ 27.             }
+ 28.             else {
+ 29.                 local fmt : format `v'
+ 30.                 local cell : display `fmt' `v'[`i']
+ 31.                 local cell = strtrim(`"`cell'"')
+ 32.             }
+ 33.             local row `"`row' `cell' |"'
+ 34.         }
+ 35.         file write `f' `"`row'"' _n
+ 36.     }
+ 37.     if `"`note'"' != "" {
+ 38.         file write `f' _n `"`note'"' _n
+ 39.     }
+ 40.     file close `f'
+ 41. end
+
+. 
+. *--------------------------------------------------------------
+. * savetab: save chosen variables as output/tables/NAME.csv and .md
+. *--------------------------------------------------------------
+. capture program drop savetab
+
+. program define savetab
+  1.     version 15
+  2.     syntax varlist, NAME(string) [TITLE(string) NOTE(string)]
+  3.     export delimited `varlist' using "output/tables/`name'.csv", replace
+  4.     md_table `varlist' using "output/tables/`name'.md", title(`"`title'"') note(`"`note'"')
+  5.     di as text "  saved output/tables/`name'.csv and output/tables/`name'.md"
+  6. end
+
+. 
+. di as text "00_programs.do: settings and programs loaded."
+00_programs.do: settings and programs loaded.
+
+. 
+end of do-file
+
+. 
+. *--------------------------------------------------------------
+. * 1. Data: build from raw files only if asked or if missing
+. *--------------------------------------------------------------
+. capture confirm file "data/derived/vlbw_sample.dta"
+
+. local have1 = (_rc == 0)
+
+. capture confirm file "data/derived/births_by_gram.dta"
+
+. local have2 = (_rc == 0)
+
+. 
+. if $REBUILD == 1 | `have1' == 0 | `have2' == 0 {
+.     do "code/01_build.do"
+. }
+
+. else {
+.     di as text _n "Using the included samples in data/derived (REBUILD = 0)."
+
+Using the included samples in data/derived (REBUILD = 0).
+. }
+
+. 
+. *--------------------------------------------------------------
+. * 2. Analysis
+. *--------------------------------------------------------------
+. do "code/02_prepare.do"        // analysis variables
+
+. *==============================================================
+. * 02_prepare.do : analysis variables
+. *
+. * Input : data/derived/vlbw_sample.dta  (births 1,350 to 1,650 g)
+. * Output: data/derived/analysis.dta     (same births, plus the
+. *         regression variables; not tracked, rebuilt each run)
+. *==============================================================
+. version 15
+
+. 
+. use "data/derived/vlbw_sample.dta", clear
+(ADKW (2010) sample, births 1,350 to 1,650 g, NCHS linked files)
+
+. assert inrange(grams, 1350, 1650)
+
+. assert vlbw == (grams < $CUTOFF)
+
+. 
+. * Trends in hundreds of grams, a separate slope on each side
+. * of the cutoff (ADKW equation 1)
+. gen double x       = dist/100
+
+. gen double x_below = vlbw*x
+
+. gen double x_above = (1 - vlbw)*x
+
+. 
+. * An unknown control value is its own category
+. foreach v of varlist year mpcb mage5 meduc4 fage5 csex gestat race3 plural border {
+  2.     quietly replace `v' = 99 if missing(`v')
+  3. }
+
+. 
+. * The paper's window: within 85 g (3 ounces) of 1,500 g
+. gen byte in85 = abs(dist) <= $WINDOW
+
+. 
+. * Rounded ("heaped") recorded weights
+. gen byte h1500  = grams == $CUTOFF
+
+. gen byte hoz    = inlist(grams, $OUNCE_HEAPS)
+
+. gen byte h10    = mod(grams, 10) == 0 & grams != $CUTOFF
+
+. gen byte heaped = h1500 == 1 | hoz == 1 | h10 == 1
+
+. 
+. label var x       "Grams from 1,500, in hundreds"
+
+. label var x_below "x if below 1,500 g"
+
+. label var x_above "x if 1,500 g or above"
+
+. label var in85    "Within 85 g of 1,500 g"
+
+. label var h1500   "Recorded at exactly 1,500 g"
+
+. label var hoz     "Recorded at a whole ounce"
+
+. label var h10     "Recorded at another multiple of 10 g"
+
+. label var heaped  "Recorded at any rounded weight"
+
+. 
+. compress
+  (0 bytes saved)
+
+. save "data/derived/analysis.dta", replace
+(note: file data/derived/analysis.dta not found)
+file data/derived/analysis.dta saved
+
+. 
+. *--------------------------------------------------------------
+. * Checks against the papers
+. *--------------------------------------------------------------
+. quietly count if in85
+
+. local n85 = r(N)
+
+. quietly count if in85 & h1500
+
+. local nheap = r(N)
+
+. quietly summarize death_1yr if in85 & dist >= 0
+
+. local mabove = 100*r(mean)
+
+. 
+. di _n as result "Sample checks"
+
+Sample checks
+
+. di as text "  Births within 85 g:        " as result %9.0fc `n85'   as text "   (ADKW 202,071; Barreca et al. 202,078)"
+  Births within 85 g:          202,078   (ADKW 202,071; Barreca et al. 202,078)
+
+. di as text "  Births at exactly 1,500 g: " as result %9.0fc `nheap' as text "   (Barreca et al. 3,544)"
+  Births at exactly 1,500 g:     3,544   (Barreca et al. 3,544)
+
+. di as text "  Deaths per 100 just above: " as result %9.2f `mabove' as text "   (ADKW Table I: 5.53)"
+  Deaths per 100 just above:      5.54   (ADKW Table I: 5.53)
+
+. 
+end of do-file
+
+. do "code/03_table1.do"         // reproduce ADKW Table I
+
+. *==============================================================
+. * 03_table1.do : reproduce ADKW (2010) Table I
+. *
+. * Four mortality outcomes, four specifications, births within 85 g:
+. *   1 local linear, triangle kernel, no controls
+. *   2 OLS, no controls
+. *   3 OLS, year controls
+. *   4 OLS, all controls (the estimate ADKW use for the cost per life)
+. * Each with the robust and the by gram standard error, next to the
+. * published numbers.
+. *
+. * Output: output/tables/table1_adkw.csv and .md
+. *==============================================================
+. version 15
+
+. 
+. use "data/derived/analysis.dta", clear
+(ADKW (2010) sample, births 1,350 to 1,650 g, NCHS linked files)
+
+. keep if in85
+(174,330 observations deleted)
+
+. gen double tri = 1 - abs(dist)/$WINDOW     // triangle kernel weights
+
+. 
+. tempname h
+
+. tempfile res
+
+. postfile `h' byte out_id byte spec_id str26 spec str12 outcome ///
+>     double b double se_r double se_g double df_r double df_g long N ///
+>     using `res', replace
+(note: file C:\Users\samosir1\AppData\Local\Temp\ST_3e10_000001.tmp not found)
+
+. 
+. local o = 0
+
+. foreach y in death_1yr death_28d death_7d death_24h {
+  2.     local ++o
+  3.     di as text "  Table I: `y'"
+  4. 
+.     rdfit `y' [aweight = tri]
+  5.     post `h' (`o') (1) ("Local linear, no controls") ("`y'") ///
+>         (r(b)) (r(se_r)) (r(se_g)) (r(df_r)) (r(df_g)) (r(N))
+  6. 
+.     rdfit `y'
+  7.     post `h' (`o') (2) ("OLS, no controls") ("`y'") ///
+>         (r(b)) (r(se_r)) (r(se_g)) (r(df_r)) (r(df_g)) (r(N))
+  8. 
+.     rdfit `y', controls(i.year)
+  9.     post `h' (`o') (3) ("OLS, year controls") ("`y'") ///
+>         (r(b)) (r(se_r)) (r(se_g)) (r(df_r)) (r(df_g)) (r(N))
+ 10. 
+.     rdfit `y', controls($CONTROLS)
+ 11.     post `h' (`o') (4) ("OLS, all controls") ("`y'") ///
+>         (r(b)) (r(se_r)) (r(se_g)) (r(df_r)) (r(df_g)) (r(N))
+ 12. }
+  Table I: death_1yr
+  Table I: death_28d
+  Table I: death_7d
+  Table I: death_24h
+
+. postclose `h'
+
+. 
+. use `res', clear
+
+. 
+. *--------------------------------------------------------------
+. * Published values, ADKW (2010) Table I, in the order
+. * local linear, OLS, OLS + year, OLS + all controls.
+. * The local linear column reports no by gram error (".").
+. * Two cells look like typos in the published table:
+. *   one year, year controls: -0.0067 (the text, p. 610, says -0.0076)
+. *   24 hours: the local linear entry repeats the 7 day one, and the
+. *   year controls entry is printed without its minus sign
+. *--------------------------------------------------------------
+. local pb1 -0.0121 -0.0095 -0.0067 -0.0072
+
+. local pb2 -0.0107 -0.0088 -0.0074 -0.0073
+
+. local pb3 -0.0068 -0.0060 -0.0049 -0.0047
+
+. local pb4 -0.0068 -0.0043  0.0036 -0.0035
+
+. local pr1  0.0023  0.0022  0.0022  0.0022
+
+. local pr2  0.0019  0.0018  0.0018  0.0018
+
+. local pr3  0.0017  0.0016  0.0016  0.0016
+
+. local pr4  0.0017  0.0013  0.0013  0.0013
+
+. local pg1  .       0.0048  0.0040  0.0040
+
+. local pg2  .       0.0038  0.0031  0.0031
+
+. local pg3  .       0.0032  0.0027  0.0027
+
+. local pg4  .       0.0023  0.0020  0.0020
+
+. 
+. gen double pub_b    = .
+(16 missing values generated)
+
+. gen double pub_se_r = .
+(16 missing values generated)
+
+. gen double pub_se_g = .
+(16 missing values generated)
+
+. forvalues o = 1/4 {
+  2.     forvalues s = 1/4 {
+  3.         local vb : word `s' of `pb`o''
+  4.         local vr : word `s' of `pr`o''
+  5.         local vg : word `s' of `pg`o''
+  6.         quietly replace pub_b    = `vb' if out_id == `o' & spec_id == `s'
+  7.         quietly replace pub_se_r = `vr' if out_id == `o' & spec_id == `s'
+  8.         quietly replace pub_se_g = `vg' if out_id == `o' & spec_id == `s'
+  9.     }
+ 10. }
+
+. 
+. gen str12 outcome_lab = ""
+(16 missing values generated)
+
+. replace outcome_lab = "One year" if out_id == 1
+(4 real changes made)
+
+. replace outcome_lab = "28 days"  if out_id == 2
+(4 real changes made)
+
+. replace outcome_lab = "7 days"   if out_id == 3
+(4 real changes made)
+
+. replace outcome_lab = "24 hours" if out_id == 4
+(4 real changes made)
+
+. 
+. gen double per100 = -100*b                  // fewer deaths per 100 babies
+
+. gen double t_r    = b/se_r
+
+. gen double t_g    = b/se_g
+
+. gen double p_r    = 2*ttail(df_r, abs(t_r))
+
+. gen double p_g    = 2*ttail(df_g, abs(t_g))
+
+. gen str16 by_gram = cond(p_g < 0.05, "significant", "could be chance")
+
+. 
+. format b pub_b se_r pub_se_r se_g pub_se_g %8.4f
+
+. format per100 t_r t_g %6.2f
+
+. format p_r p_g %5.3f
+
+. format N %9.0fc
+
+. 
+. label var outcome_lab "Outcome"
+
+. label var spec        "Specification"
+
+. label var b           "Ours"
+
+. label var pub_b       "Published"
+
+. label var se_r        "Robust SE, ours"
+
+. label var pub_se_r    "Robust SE, published"
+
+. label var se_g        "By gram SE, ours"
+
+. label var pub_se_g    "By gram SE, published"
+
+. label var per100      "Fewer deaths per 100"
+
+. label var p_g         "p, by gram"
+
+. label var by_gram     "By gram verdict"
+
+. label var N           "Births"
+
+. 
+. sort out_id spec_id
+
+. list outcome_lab spec b pub_b se_r pub_se_r se_g pub_se_g, sepby(out_id) noobs abbreviate(12)
+
+  +-----------------------------------------------------------------------------------------------------+
+  | outcome_lab                        spec         b     pub_b     se_r   pub_se_r     se_g   pub_se_g |
+  |-----------------------------------------------------------------------------------------------------|
+  |    One year   Local linear, no controls   -0.0121   -0.0121   0.0025     0.0023   0.0055          . |
+  |    One year            OLS, no controls   -0.0095   -0.0095   0.0022     0.0022   0.0047     0.0048 |
+  |    One year          OLS, year controls   -0.0076   -0.0067   0.0022     0.0022   0.0040     0.0040 |
+  |    One year           OLS, all controls   -0.0072   -0.0072   0.0022     0.0022   0.0039     0.0040 |
+  |-----------------------------------------------------------------------------------------------------|
+  |     28 days   Local linear, no controls   -0.0106   -0.0107   0.0021     0.0019   0.0041          . |
+  |     28 days            OLS, no controls   -0.0088   -0.0088   0.0018     0.0018   0.0037     0.0038 |
+  |     28 days          OLS, year controls   -0.0073   -0.0074   0.0018     0.0018   0.0031     0.0031 |
+  |     28 days           OLS, all controls   -0.0071   -0.0073   0.0018     0.0018   0.0031     0.0031 |
+  |-----------------------------------------------------------------------------------------------------|
+  |      7 days   Local linear, no controls   -0.0067   -0.0068   0.0018     0.0017   0.0036          . |
+  |      7 days            OLS, no controls   -0.0060   -0.0060   0.0016     0.0016   0.0032     0.0032 |
+  |      7 days          OLS, year controls   -0.0048   -0.0049   0.0016     0.0016   0.0027     0.0027 |
+  |      7 days           OLS, all controls   -0.0045   -0.0047   0.0016     0.0016   0.0027     0.0027 |
+  |-----------------------------------------------------------------------------------------------------|
+  |    24 hours   Local linear, no controls   -0.0050   -0.0068   0.0015     0.0017   0.0026          . |
+  |    24 hours            OLS, no controls   -0.0042   -0.0043   0.0013     0.0013   0.0023     0.0023 |
+  |    24 hours          OLS, year controls   -0.0035    0.0036   0.0013     0.0013   0.0020     0.0020 |
+  |    24 hours           OLS, all controls   -0.0033   -0.0035   0.0013     0.0013   0.0019     0.0020 |
+  +-----------------------------------------------------------------------------------------------------+
+
+. 
+. savetab outcome_lab spec b pub_b se_r pub_se_r se_g pub_se_g per100 p_g by_gram N, ///
+>     name(table1_adkw) ///
+>     title("Table 1. Reproduction of ADKW (2010) Table I: mortality and very low birth weight") ///
+>     note("Coefficient on birth weight below 1,500 g; negative means fewer deaths below the line. Births within 85 g of 1,500 g, US births 1983 to 1991 and 1995 to 2002. Local
+>  linear: triangle kernel. All controls: year, month prenatal care began, mother's age, education and race, father's age, sex, weeks of gestation, plurality and birth order. P
+> ublished Table I prints -0.0067 for one year with year controls; the paper's text and our estimate give -0.0076. By gram: standard errors clustered by recorded gram, as in Ba
+> rreca et al. (2011).")
+(note: file output/tables/table1_adkw.csv not found)
+file output/tables/table1_adkw.csv saved
+(note: file output/tables/table1_adkw.md not found)
+  saved output/tables/table1_adkw.csv and output/tables/table1_adkw.md
+
+. 
+. * Headline checks
+. quietly summarize b if out_id == 1 & spec_id == 1
+
+. di as text _n "Headline (local linear, one year): " as result %7.4f r(mean) as text "   published -0.0121"
+
+Headline (local linear, one year): -0.0121   published -0.0121
+
+. quietly summarize b if out_id == 1 & spec_id == 4
+
+. di as text "Cost per life estimate (all controls, one year): " as result %7.4f r(mean) as text "   published -0.0072"
+Cost per life estimate (all controls, one year): -0.0072   published -0.0072
+
+. 
+. * keep the results for later files
+. save "data/derived/results_table1.dta", replace
+(note: file data/derived/results_table1.dta not found)
+file data/derived/results_table1.dta saved
+
+. 
+end of do-file
+
+. do "code/04_heaping.do"        // the heap at exactly 1,500 g
+
+. *==============================================================
+. * 04_heaping.do : the heap of births at exactly 1,500 g
+. *
+. * The critique of Barreca et al. (2011): many weights are rounded,
+. * births pile up ("heap") at round numbers, and the babies recorded
+. * at exactly 1,500 g are sicker than their neighbours. VLBW means
+. * strictly below 1,500 g, so all of them count as untreated.
+. *
+. * Output: output/tables/table2_heap_facts      who is in the heap
+. *         output/tables/table3_round_heaps     1,400 vs 1,500 vs 1,600 g
+. *         output/figures/fig1_heaping.png      births per gram
+. *         output/figures/fig2_deaths_by_gram.png
+. *         output/figures/fig3_rd_plot.png      ADKW Figure II, rebuilt
+. *==============================================================
+. version 15
+
+. 
+. use "data/derived/analysis.dta", clear
+(ADKW (2010) sample, births 1,350 to 1,650 g, NCHS linked files)
+
+. 
+. *--------------------------------------------------------------
+. * Table 2: babies at exactly 1,500 g against their neighbours
+. *--------------------------------------------------------------
+. gen byte group = .
+(376,408 missing values generated)
+
+. replace group = 1 if inrange(grams, 1490, 1499)
+(3,439 real changes made)
+
+. replace group = 2 if grams == 1500
+(3,544 real changes made)
+
+. replace group = 3 if inrange(grams, 1501, 1510)
+(26,251 real changes made)
+
+. 
+. gen byte white  = race3 == 1
+
+. gen byte black  = race3 == 2
+
+. gen byte lesshs = meduc4 == 1 if meduc4 != 99     // known education only
+(33,855 missing values generated)
+
+. gen gestw       = gestat if gestat != 99
+(13,734 missing values generated)
+
+. 
+. local lab1 "1,490 to 1,499 g (below the line)"
+
+. local lab2 "Exactly 1,500 g"
+
+. local lab3 "1,501 to 1,510 g (above the line)"
+
+. 
+. tempname h
+
+. tempfile res
+
+. postfile `h' byte g_id str36 group_lab long births double d1yr double d28 ///
+>     double pwhite double pblack double plesshs double gest using `res', replace
+(note: file C:\Users\samosir1\AppData\Local\Temp\ST_3e10_000001.tmp not found)
+
+. forvalues g = 1/3 {
+  2.     quietly count if group == `g'
+  3.     local n = r(N)
+  4.     foreach v in death_1yr death_28d white black lesshs {
+  5.         quietly summarize `v' if group == `g'
+  6.         local m_`v' = 100*r(mean)
+  7.     }
+  8.     quietly summarize gestw if group == `g'
+  9.     local m_gest = r(mean)
+ 10.     post `h' (`g') ("`lab`g''") (`n') (`m_death_1yr') (`m_death_28d') ///
+>         (`m_white') (`m_black') (`m_lesshs') (`m_gest')
+ 11. }
+
+. postclose `h'
+
+. 
+. preserve
+
+. use `res', clear
+
+. format births %9.0fc
+
+. format d1yr d28 pwhite pblack plesshs %5.1f
+
+. format gest %5.1f
+
+. label var group_lab "Recorded weight"
+
+. label var births    "Births"
+
+. label var d1yr      "Died within a year (%)"
+
+. label var d28       "Died within 28 days (%)"
+
+. label var pwhite    "White mother (%)"
+
+. label var pblack    "Black mother (%)"
+
+. label var plesshs   "Mother without high school (%)"
+
+. label var gest      "Weeks of gestation"
+
+. list group_lab births d1yr d28 pwhite plesshs, noobs abbreviate(12)
+
+  +----------------------------------------------------------------------------+
+  |                         group_lab   births   d1yr   d28   pwhite   plesshs |
+  |----------------------------------------------------------------------------|
+  | 1,490 to 1,499 g (below the line)    3,439    5.2   3.5     65.7      28.8 |
+  |                   Exactly 1,500 g    3,544   10.1   7.4     62.3      31.1 |
+  | 1,501 to 1,510 g (above the line)   26,251    6.0   4.3     66.5      27.6 |
+  +----------------------------------------------------------------------------+
+
+. savetab group_lab births d1yr d28 pwhite pblack plesshs gest, ///
+>     name(table2_heap_facts) ///
+>     title("Table 2. Babies recorded at exactly 1,500 g are different") ///
+>     note("US births 1983 to 1991 and 1995 to 2002. Mother without high school: share of mothers with known education. VLBW means strictly below 1,500 g, so every baby at exac
+> tly 1,500 g counts as untreated.")
+(note: file output/tables/table2_heap_facts.csv not found)
+file output/tables/table2_heap_facts.csv saved
+(note: file output/tables/table2_heap_facts.md not found)
+  saved output/tables/table2_heap_facts.csv and output/tables/table2_heap_facts.md
+
+. restore
+
+. 
+. *--------------------------------------------------------------
+. * Table 3: the 1,500 g heap against the 1,400 g and 1,600 g heaps
+. * (each heap against births within 10 g of it)
+. *--------------------------------------------------------------
+. tempname h3
+
+. tempfile res3
+
+. postfile `h3' int heap long births double d_heap double d_near double excess ///
+>     using `res3', replace
+(note: file C:\Users\samosir1\AppData\Local\Temp\ST_3e10_000003.tmp not found)
+
+. foreach c in 1400 1500 1600 {
+  2.     quietly count if grams == `c'
+  3.     local n = r(N)
+  4.     quietly summarize death_1yr if grams == `c'
+  5.     local dh = 100*r(mean)
+  6.     quietly summarize death_1yr if inrange(grams, `c' - 10, `c' + 10) & grams != `c'
+  7.     local dn = 100*r(mean)
+  8.     post `h3' (`c') (`n') (`dh') (`dn') (`dh' - `dn')
+  9. }
+
+. postclose `h3'
+
+. 
+. preserve
+
+. use `res3', clear
+
+. format heap %5.0fc
+
+. format births %9.0fc
+
+. format d_heap d_near excess %5.1f
+
+. label var heap   "Heap (g)"
+
+. label var births "Births at the heap"
+
+. label var d_heap "Deaths per 100 at the heap"
+
+. label var d_near "Deaths per 100 within 10 g"
+
+. label var excess "Extra deaths per 100"
+
+. list, noobs abbreviate(12)
+
+  +-------------------------------------------+
+  |  heap   births   d_heap   d_near   excess |
+  |-------------------------------------------|
+  | 1,400    2,937      8.6      6.3      2.3 |
+  | 1,500    3,544     10.1      5.9      4.2 |
+  | 1,600    3,709      7.6      4.5      3.1 |
+  +-------------------------------------------+
+
+. savetab heap births d_heap d_near excess, name(table3_round_heaps) ///
+>     title("Table 3. Every round number heap holds sicker babies, and 1,500 g most of all") ///
+>     note("Deaths within one year. Within 10 g: births 10 g either side of the heap, the heap itself excluded.")
+(note: file output/tables/table3_round_heaps.csv not found)
+file output/tables/table3_round_heaps.csv saved
+(note: file output/tables/table3_round_heaps.md not found)
+  saved output/tables/table3_round_heaps.csv and output/tables/table3_round_heaps.md
+
+. restore
+
+. 
+. *--------------------------------------------------------------
+. * Figure 1: births per recorded gram
+. *--------------------------------------------------------------
+. preserve
+
+. keep if inrange(grams, 1415, 1585)
+(174,330 observations deleted)
+
+. contract grams, freq(births)
+
+. gen byte type = 3
+
+. replace type = 2 if inlist(grams, $OUNCE_HEAPS)
+(7 real changes made)
+
+. replace type = 1 if grams == $CUTOFF
+(1 real change made)
+
+. quietly summarize births if type == 3, detail
+
+. local typical = round(r(p50), 10)
+
+. quietly summarize births if grams == 1500
+
+. local n1500 = strtrim(string(r(mean), "%9.0fc"))
+
+. quietly summarize births if grams == 1503
+
+. local n1503 = strtrim(string(r(mean), "%9.0fc"))
+
+. 
+. twoway (bar births grams if type == 3, barwidth(0.8) color("$GREY"))   ///
+>        (bar births grams if type == 2, barwidth(0.8) color("$BLUE"))   ///
+>        (bar births grams if type == 1, barwidth(0.8) color("$ORANGE")), ///
+>     title("Birth weights pile up on round numbers", color("$NAVY") size(medlarge)) ///
+>     subtitle("Births per recorded gram, 1,415 to 1,585 g, US births 1983 to 2002") ///
+>     xtitle("Recorded birth weight (g)") ytitle("Births")                          ///
+>     xlabel(1420(20)1580) ylabel(0(5000)25000, format(%9.0fc) angle(0))          ///
+>     yscale(range(0 29000))                                                       ///
+>     xline(1500, lpattern(dash) lcolor("$DARK"))                                  ///
+>     text(27500 1497 "Exactly 1,500 g: `n1500' births", place(w) size(vsmall))   ///
+>     text(27500 1506 "1,503 g (53 oz): `n1503' births", place(e) size(vsmall))   ///
+>     legend(order(3 "Exactly 1,500 g" 2 "Whole ounces" 1 "Other grams") rows(1) position(6)) ///
+>     note("Most other grams hold about `typical' births each. Source: our tabulation of the NCHS linked birth and infant death files.") ///
+>     graphregion(color(white)) plotregion(color(white)) scheme(s1color)
+
+. graph export "output/figures/fig1_heaping.png", replace width(2000)
+(note: file output/figures/fig1_heaping.png not found)
+(file output/figures/fig1_heaping.png written in PNG format)
+
+. restore
+
+. 
+. *--------------------------------------------------------------
+. * Figure 2: deaths per 100 at each recorded gram
+. *--------------------------------------------------------------
+. preserve
+
+. keep if inrange(grams, 1415, 1585)
+(174,330 observations deleted)
+
+. collapse (mean) rate = death_1yr (count) births = death_1yr, by(grams)
+
+. replace rate = 100*rate
+(171 real changes made)
+
+. gen byte type = 3
+
+. replace type = 2 if inlist(grams, $OUNCE_HEAPS)
+(7 real changes made)
+
+. replace type = 1 if grams == $CUTOFF
+(1 real change made)
+
+. 
+. twoway (scatter rate grams if type == 3 [aweight = births], msymbol(O) mcolor("$GREY") mlcolor(white)) ///
+>        (scatter rate grams if type == 2 [aweight = births], msymbol(O) mcolor("$BLUE") mlcolor(white)) ///
+>        (scatter rate grams if type == 1 [aweight = births], msymbol(O) mcolor("$ORANGE") mlcolor(white)), ///
+>     title("Babies recorded at exactly 1,500 g die at higher rates", color("$NAVY") size(medlarge)) ///
+>     subtitle("Deaths within one year at each recorded gram; marker size shows births") ///
+>     xtitle("Recorded birth weight (g)") ytitle("Deaths per 100 babies")          ///
+>     xlabel(1420(20)1580) ylabel(, angle(0))                                       ///
+>     xline(1500, lpattern(dash) lcolor("$DARK"))                                  ///
+>     legend(order(3 "Exactly 1,500 g" 2 "Whole ounces" 1 "Other grams") rows(1) position(6)) ///
+>     note("Source: our calculation from the NCHS linked birth and infant death files.") ///
+>     graphregion(color(white)) plotregion(color(white)) scheme(s1color)
+
+. graph export "output/figures/fig2_deaths_by_gram.png", replace width(2000)
+(note: file output/figures/fig2_deaths_by_gram.png not found)
+(file output/figures/fig2_deaths_by_gram.png written in PNG format)
+
+. restore
+
+. 
+. *--------------------------------------------------------------
+. * Figure 3: ADKW Figure II rebuilt: one ounce bins, fitted lines
+. *--------------------------------------------------------------
+. quietly regress death_1yr vlbw x_below x_above if in85
+
+. local b0 = _b[_cons]
+
+. local b1 = _b[vlbw]
+
+. local b2 = _b[x_below]
+
+. local b3 = _b[x_above]
+
+. local gap : display %4.2f -100*`b1'
+
+. 
+. preserve
+
+. keep if inrange(grams, 1350, 1649)
+(2,536 observations deleted)
+
+. gen bin = floor((grams - $CUTOFF)/$OUNCE)
+
+. keep if inrange(bin, -5, 4)                  // bins that lie fully in the data
+(32,941 observations deleted)
+
+. collapse (mean) rate = death_1yr, by(bin)
+
+. gen mid = $CUTOFF + (bin + 0.5)*$OUNCE
+
+. replace rate = 100*rate
+(10 real changes made)
+
+. list bin mid rate, noobs                    // ADKW Figure II: 5.69 just below, 6.15 just above
+
+  +--------------------------+
+  | bin        mid      rate |
+  |--------------------------|
+  |  -5   1372.427    7.7292 |
+  |  -4   1400.777   6.93745 |
+  |  -3   1429.126    6.3181 |
+  |  -2   1457.476   6.11948 |
+  |  -1   1485.825   5.69209 |
+  |--------------------------|
+  |   0   1514.175   6.15406 |
+  |   1   1542.524    5.4012 |
+  |   2   1570.874   5.05045 |
+  |   3   1599.223   5.25947 |
+  |   4   1627.573   4.58524 |
+  +--------------------------+
+
+. 
+. twoway (scatter rate mid if mid < $CUTOFF, msymbol(O) msize(large) mcolor("$BLUE"))  ///
+>        (scatter rate mid if mid > $CUTOFF, msymbol(O) msize(large) mcolor("$GREY"))  ///
+>        (function y = 100*(`b0' + `b1' + `b2'*(x - $CUTOFF)/100), range(1415 1500)    ///
+>             lcolor("$BLUE") lwidth(thick))                                          ///
+>        (function y = 100*(`b0' + `b3'*(x - $CUTOFF)/100), range(1500 1585)           ///
+>             lcolor("$GREY") lwidth(thick)),                                         ///
+>     title("Fewer babies die just below the 1,500 g line", color("$NAVY") size(medlarge)) ///
+>     subtitle("Deaths within one year by birth weight, one ounce bins")           ///
+>     xtitle("Recorded birth weight (g)") ytitle("Deaths per 100 babies")          ///
+>     xlabel(1350(50)1650) ylabel(4(1)8, angle(0)) yscale(range(4 8))              ///
+>     xline(1500, lpattern(dash) lcolor("$DARK"))                                  ///
+>     text(4.8 1495 "Gap at the line:" "`gap' fewer deaths per 100", place(w) size(small)) ///
+>     legend(order(1 "Below 1,500 g: labelled very low birth weight" 2 "1,500 g and above") rows(1) position(6)) ///
+>     note("Lines: OLS on births within 85 g, no controls. Compare ADKW (2010), Figure II.") ///
+>     graphregion(color(white)) plotregion(color(white)) scheme(s1color)
+
+. graph export "output/figures/fig3_rd_plot.png", replace width(2000)
+(note: file output/figures/fig3_rd_plot.png not found)
+(file output/figures/fig3_rd_plot.png written in PNG format)
+
+. restore
+
+. 
+. di as text "04_heaping.do complete."
+04_heaping.do complete.
+
+. 
+end of do-file
+
+. do "code/05_donut.do"          // donut RD and cost per life
+
+. *==============================================================
+. * 05_donut.do : the donut test of Barreca et al. (2011, Table I)
+. *
+. * If the drop in deaths comes from extra care, removing a few
+. * births right at the cutoff should barely change it. We drop the
+. * births at exactly 1,500 g, then those within 1, 2 and 3 g of it,
+. * and rerun ADKW's all controls regression on what is left.
+. * The 3 g hole (1,497 to 1,503 g) also removes the 53 ounce heap
+. * at 1,503 g, about 11% of all births in the window.
+. *
+. * Then the cost per life saved, 3,795 dollars divided by each estimate.
+. *
+. * Output: output/tables/table4_donut.csv and .md
+. *         output/tables/table5_cost_per_life.csv and .md
+. *         output/figures/fig4_donut.png
+. *==============================================================
+. version 15
+
+. 
+. use "data/derived/analysis.dta", clear
+(ADKW (2010) sample, births 1,350 to 1,650 g, NCHS linked files)
+
+. keep if in85
+(174,330 observations deleted)
+
+. quietly count
+
+. local N0 = r(N)
+
+. 
+. local cond1 ""
+
+. local cond2 "if grams != 1500"
+
+. local cond3 "if abs(dist) > 1"
+
+. local cond4 "if abs(dist) > 2"
+
+. local cond5 "if abs(dist) > 3"
+
+. local hole1 "Nothing"
+
+. local hole2 "Exactly 1,500 g"
+
+. local hole3 "1,499 to 1,501 g"
+
+. local hole4 "1,498 to 1,502 g"
+
+. local hole5 "1,497 to 1,503 g"
+
+. 
+. tempname h
+
+. tempfile res
+
+. postfile `h' byte out_id byte hole_id str16 hole str12 outcome ///
+>     double b double se_r double se_g double df_r double df_g long N ///
+>     using `res', replace
+(note: file C:\Users\samosir1\AppData\Local\Temp\ST_3e10_000001.tmp not found)
+
+. 
+. local o = 0
+
+. foreach y in death_1yr death_28d death_7d death_24h {
+  2.     local ++o
+  3.     forvalues k = 1/5 {
+  4.         di as text "  Donut: `y', removing `hole`k''"
+  5.         rdfit `y' `cond`k'', controls($CONTROLS)
+  6.         post `h' (`o') (`k') ("`hole`k''") ("`y'") ///
+>             (r(b)) (r(se_r)) (r(se_g)) (r(df_r)) (r(df_g)) (r(N))
+  7.     }
+  8. }
+  Donut: death_1yr, removing Nothing
+  Donut: death_1yr, removing Exactly 1,500 g
+  Donut: death_1yr, removing 1,499 to 1,501 g
+  Donut: death_1yr, removing 1,498 to 1,502 g
+  Donut: death_1yr, removing 1,497 to 1,503 g
+  Donut: death_28d, removing Nothing
+  Donut: death_28d, removing Exactly 1,500 g
+  Donut: death_28d, removing 1,499 to 1,501 g
+  Donut: death_28d, removing 1,498 to 1,502 g
+  Donut: death_28d, removing 1,497 to 1,503 g
+  Donut: death_7d, removing Nothing
+  Donut: death_7d, removing Exactly 1,500 g
+  Donut: death_7d, removing 1,499 to 1,501 g
+  Donut: death_7d, removing 1,498 to 1,502 g
+  Donut: death_7d, removing 1,497 to 1,503 g
+  Donut: death_24h, removing Nothing
+  Donut: death_24h, removing Exactly 1,500 g
+  Donut: death_24h, removing 1,499 to 1,501 g
+  Donut: death_24h, removing 1,498 to 1,502 g
+  Donut: death_24h, removing 1,497 to 1,503 g
+
+. postclose `h'
+
+. 
+. use `res', clear
+
+. 
+. *--------------------------------------------------------------
+. * Published values, Barreca et al. (2011) Table I, Panels A to E
+. * (standard errors clustered by gram)
+. *--------------------------------------------------------------
+. local pb1 -0.0071 -0.0033 -0.0035 -0.0027 -0.0018
+
+. local pb2 -0.0071 -0.0042 -0.0043 -0.0037 -0.0026
+
+. local pb3 -0.0046 -0.0023 -0.0024 -0.0019 -0.0018
+
+. local pb4 -0.0033 -0.0018 -0.0018 -0.0013 -0.0011
+
+. local pg1  0.0041  0.0014  0.0014  0.0014  0.0019
+
+. local pg2  0.0032  0.0013  0.0012  0.0012  0.0015
+
+. local pg3  0.0028  0.0013  0.0013  0.0012  0.0015
+
+. local pg4  0.0020  0.0010  0.0010  0.0009  0.0014
+
+. 
+. gen double pub_b    = .
+(20 missing values generated)
+
+. gen double pub_se_g = .
+(20 missing values generated)
+
+. forvalues o = 1/4 {
+  2.     forvalues k = 1/5 {
+  3.         local vb : word `k' of `pb`o''
+  4.         local vg : word `k' of `pg`o''
+  5.         quietly replace pub_b    = `vb' if out_id == `o' & hole_id == `k'
+  6.         quietly replace pub_se_g = `vg' if out_id == `o' & hole_id == `k'
+  7.     }
+  8. }
+
+. 
+. gen str12 outcome_lab = ""
+(20 missing values generated)
+
+. replace outcome_lab = "One year" if out_id == 1
+(5 real changes made)
+
+. replace outcome_lab = "28 days"  if out_id == 2
+(5 real changes made)
+
+. replace outcome_lab = "7 days"   if out_id == 3
+(5 real changes made)
+
+. replace outcome_lab = "24 hours" if out_id == 4
+(5 real changes made)
+
+. 
+. gen long   removed = `N0' - N
+
+. gen double pct_removed = 100*removed/`N0'
+
+. gen double per100 = -100*b
+
+. gen double t_g    = b/se_g
+
+. gen double p_g    = 2*ttail(df_g, abs(t_g))
+
+. gen str16 by_gram = cond(p_g < 0.05, "significant", "could be chance")
+
+. bysort out_id (hole_id): gen double pct_of_full = 100*b/b[1]
+
+. 
+. format b pub_b se_g pub_se_g se_r %8.4f
+
+. format per100 t_g %6.2f
+
+. format p_g %5.3f
+
+. format pct_removed pct_of_full %5.1f
+
+. format N removed %9.0fc
+
+. 
+. label var outcome_lab "Outcome"
+
+. label var hole        "Births removed"
+
+. label var b           "Ours"
+
+. label var pub_b       "Barreca et al."
+
+. label var se_g        "By gram SE, ours"
+
+. label var pub_se_g    "By gram SE, Barreca et al."
+
+. label var per100      "Fewer deaths per 100"
+
+. label var pct_of_full "Share of full estimate (%)"
+
+. label var pct_removed "Births removed (%)"
+
+. label var p_g         "p, by gram"
+
+. label var by_gram     "By gram verdict"
+
+. label var N           "Births"
+
+. 
+. sort out_id hole_id
+
+. list outcome_lab hole b pub_b se_g pub_se_g pct_of_full N, sepby(out_id) noobs abbreviate(12)
+
+  +------------------------------------------------------------------------------------------------+
+  | outcome_lab               hole         b     pub_b     se_g   pub_se_g   pct_of_full         N |
+  |------------------------------------------------------------------------------------------------|
+  |    One year            Nothing   -0.0072   -0.0071   0.0039     0.0041         100.0   202,078 |
+  |    One year    Exactly 1,500 g   -0.0036   -0.0033   0.0014     0.0014          50.4   198,534 |
+  |    One year   1,499 to 1,501 g   -0.0038   -0.0035   0.0013     0.0014          52.3   198,334 |
+  |    One year   1,498 to 1,502 g   -0.0032   -0.0027   0.0014     0.0014          44.9   197,135 |
+  |    One year   1,497 to 1,503 g   -0.0018   -0.0018   0.0018     0.0019          25.7   175,108 |
+  |------------------------------------------------------------------------------------------------|
+  |     28 days            Nothing   -0.0071   -0.0071   0.0031     0.0032         100.0   202,078 |
+  |     28 days    Exactly 1,500 g   -0.0043   -0.0042   0.0013     0.0013          61.1   198,534 |
+  |     28 days   1,499 to 1,501 g   -0.0045   -0.0043   0.0013     0.0012          63.3   198,334 |
+  |     28 days   1,498 to 1,502 g   -0.0040   -0.0037   0.0013     0.0012          56.9   197,135 |
+  |     28 days   1,497 to 1,503 g   -0.0027   -0.0026   0.0016     0.0015          37.7   175,108 |
+  |------------------------------------------------------------------------------------------------|
+  |      7 days            Nothing   -0.0045   -0.0046   0.0027     0.0028         100.0   202,078 |
+  |      7 days    Exactly 1,500 g   -0.0024   -0.0023   0.0014     0.0013          52.6   198,534 |
+  |      7 days   1,499 to 1,501 g   -0.0025   -0.0024   0.0014     0.0013          55.1   198,334 |
+  |      7 days   1,498 to 1,502 g   -0.0021   -0.0019   0.0013     0.0012          45.8   197,135 |
+  |      7 days   1,497 to 1,503 g   -0.0018   -0.0018   0.0016     0.0015          40.8   175,108 |
+  |------------------------------------------------------------------------------------------------|
+  |    24 hours            Nothing   -0.0033   -0.0033   0.0019     0.0020         100.0   202,078 |
+  |    24 hours    Exactly 1,500 g   -0.0018   -0.0018   0.0011     0.0010          54.7   198,534 |
+  |    24 hours   1,499 to 1,501 g   -0.0019   -0.0018   0.0011     0.0010          57.0   198,334 |
+  |    24 hours   1,498 to 1,502 g   -0.0014   -0.0013   0.0010     0.0009          42.3   197,135 |
+  |    24 hours   1,497 to 1,503 g   -0.0010   -0.0011   0.0016     0.0014          31.9   175,108 |
+  +------------------------------------------------------------------------------------------------+
+
+. 
+. savetab outcome_lab hole b pub_b se_g pub_se_g per100 pct_of_full pct_removed p_g by_gram N, ///
+>     name(table4_donut) ///
+>     title("Table 4. The donut test: remove births at the cutoff and the effect shrinks") ///
+>     note("ADKW's all controls regression, births within 85 g, after removing the births listed. Barreca et al. (2011), Table I, report the same regressions; our sample has th
+> e same number of births in every row. By gram: standard errors clustered by recorded gram.")
+(note: file output/tables/table4_donut.csv not found)
+file output/tables/table4_donut.csv saved
+(note: file output/tables/table4_donut.md not found)
+  saved output/tables/table4_donut.csv and output/tables/table4_donut.md
+
+. 
+. save "data/derived/results_donut.dta", replace
+(note: file data/derived/results_donut.dta not found)
+file data/derived/results_donut.dta saved
+
+. 
+. *--------------------------------------------------------------
+. * Figure 4: one year estimate as the hole grows, 95% ranges by gram
+. *--------------------------------------------------------------
+. preserve
+
+. keep if out_id == 1
+(15 observations deleted)
+
+. gen double tcrit = invttail(df_g, 0.025)
+
+. gen double lo = per100 - 100*tcrit*se_g
+
+. gen double hi = per100 + 100*tcrit*se_g
+
+. gen byte ypos = 6 - hole_id
+
+. label define holes 5 "Nothing removed" 4 "Exactly 1,500 g" 3 "1,499 to 1,501 g" ///
+>                    2 "1,498 to 1,502 g" 1 "1,497 to 1,503 g"
+
+. label values ypos holes
+
+. gen lab = string(per100, "%4.2f")
+
+. 
+. twoway (rcap lo hi ypos, horizontal lcolor("$GREY") lwidth(medthick))                 ///
+>        (scatter ypos per100, msymbol(O) msize(large) mcolor("$NAVY")                   ///
+>             mlabel(lab) mlabposition(12) mlabcolor(black) mlabsize(small)),            ///
+>     title("Remove a few grams at the cutoff and most of the effect goes", color("$NAVY") size(medlarge)) ///
+>     subtitle("Fewer deaths per 100 babies just below 1,500 g, one year, all controls")  ///
+>     xtitle("Fewer deaths per 100 babies (dot) and 95% range clustered by gram (line)") ///
+>     ytitle("Births removed") ylabel(1(1)5, valuelabel angle(0) noticks)                 ///
+>     yscale(range(0.5 5.7)) xline(0, lpattern(dash) lcolor("$DARK"))                    ///
+>     legend(off)                                                                        ///
+>     note("Same regression and sample as Barreca et al. (2011), Table I.")              ///
+>     graphregion(color(white)) plotregion(color(white)) scheme(s1color)
+
+. graph export "output/figures/fig4_donut.png", replace width(2000)
+(note: file output/figures/fig4_donut.png not found)
+(file output/figures/fig4_donut.png written in PNG format)
+
+. restore
+
+. 
+. *--------------------------------------------------------------
+. * Table 5: cost per life saved = extra cost per baby / fewer deaths
+. * per baby, holding ADKW's 3,795 dollar cost jump fixed
+. *--------------------------------------------------------------
+. keep if out_id == 1
+(15 observations deleted)
+
+. gen double tcrit = invttail(df_g, 0.025)
+
+. gen double b_most  = b - tcrit*se_g      // most lives saved in the 95% range
+
+. gen double b_least = b + tcrit*se_g      // fewest lives saved in the 95% range
+
+. gen double cost      = $COST/(-b)
+
+. gen double cost_low  = $COST/(-b_most)
+
+. gen str24  cost_high = cond(b_least < 0, strtrim(string($COST/(-b_least), "%14.0fc")), "no upper limit")
+
+. gen double ratio_vsl = cost/$VSL
+
+. 
+. format cost cost_low %12.0fc
+
+. format ratio_vsl %5.2f
+
+. label var cost      "Cost per life saved"
+
+. label var cost_low  "Lowest in 95% range"
+
+. label var cost_high "Highest in 95% range"
+
+. label var ratio_vsl "Share of the 2.7 million value of a life"
+
+. 
+. list hole per100 cost cost_low cost_high, noobs abbreviate(12)
+
+  +-------------------------------------------------------------------+
+  |             hole   per100        cost   cost_low        cost_high |
+  |-------------------------------------------------------------------|
+  |          Nothing     0.72     528,740    256,660   no upper limit |
+  |  Exactly 1,500 g     0.36   1,049,928    603,502        4,033,922 |
+  | 1,499 to 1,501 g     0.38   1,010,110    592,208        3,431,851 |
+  | 1,498 to 1,502 g     0.32   1,178,442    640,865        7,311,824 |
+  | 1,497 to 1,503 g     0.18   2,055,004    694,924   no upper limit |
+  +-------------------------------------------------------------------+
+
+. savetab hole per100 cost cost_low cost_high ratio_vsl, name(table5_cost_per_life) ///
+>     title("Table 5. The cost per life saved depends on which births are kept") ///
+>     note("2006 US dollars. Cost per life = 3,795 dollars of extra hospital cost per baby (ADKW Section VIII.B) divided by the drop in one year deaths per baby. The 95% range 
+> uses standard errors clustered by gram; when it includes zero, the cost per life has no upper limit. The cost jump is held fixed because the hospital cost data are not public
+> .")
+(note: file output/tables/table5_cost_per_life.csv not found)
+file output/tables/table5_cost_per_life.csv saved
+(note: file output/tables/table5_cost_per_life.md not found)
+  saved output/tables/table5_cost_per_life.csv and output/tables/table5_cost_per_life.md
+
+. 
+. di as text "05_donut.do complete."
+05_donut.do complete.
+
+. 
+end of do-file
+
+. do "code/06_bandwidth.do"      // bandwidth sensitivity (ADKW Table A3)
+
+. *==============================================================
+. * 06_bandwidth.do : bandwidth sensitivity (ADKW Online Appendix Table A3)
+. *
+. * ADKW's local linear estimate at windows of 30 to 150 g either
+. * side of the cutoff. The paper reads the falling estimate as a
+. * sign that its 85 g window is conservative. Our reading: the
+. * estimate is largest in the narrowest window, where the heaps at
+. * the cutoff weigh most, and it more than triples from 150 g to 30 g.
+. *
+. * Output: output/tables/table6_bandwidth.csv and .md
+. *         output/figures/fig5_bandwidth.png
+. *==============================================================
+. version 15
+
+. 
+. use "data/derived/analysis.dta", clear   // all births 1,350 to 1,650 g
+(ADKW (2010) sample, births 1,350 to 1,650 g, NCHS linked files)
+
+. 
+. tempname h
+
+. tempfile res
+
+. postfile `h' byte out_id int bw str12 outcome ///
+>     double b double se_r double se_g double df_r double df_g long N ///
+>     using `res', replace
+(note: file C:\Users\samosir1\AppData\Local\Temp\ST_3e10_000001.tmp not found)
+
+. 
+. local o = 0
+
+. foreach y in death_1yr death_28d {
+  2.     local ++o
+  3.     foreach bw in 30 60 85 90 120 150 {
+  4.         di as text "  Bandwidth `bw' g: `y'"
+  5.         capture drop tri_bw
+  6.         gen double tri_bw = 1 - abs(dist)/`bw' if abs(dist) <= `bw'
+  7.         rdfit `y' if abs(dist) <= `bw' [aweight = tri_bw]
+  8.         post `h' (`o') (`bw') ("`y'") ///
+>             (r(b)) (r(se_r)) (r(se_g)) (r(df_r)) (r(df_g)) (r(N))
+  9.     }
+ 10. }
+  Bandwidth 30 g: death_1yr
+(303,467 missing values generated)
+  Bandwidth 60 g: death_1yr
+(212,986 missing values generated)
+  Bandwidth 85 g: death_1yr
+(174,330 missing values generated)
+  Bandwidth 90 g: death_1yr
+(142,521 missing values generated)
+  Bandwidth 120 g: death_1yr
+(71,772 missing values generated)
+  Bandwidth 150 g: death_1yr
+  Bandwidth 30 g: death_28d
+(303,467 missing values generated)
+  Bandwidth 60 g: death_28d
+(212,986 missing values generated)
+  Bandwidth 85 g: death_28d
+(174,330 missing values generated)
+  Bandwidth 90 g: death_28d
+(142,521 missing values generated)
+  Bandwidth 120 g: death_28d
+(71,772 missing values generated)
+  Bandwidth 150 g: death_28d
+
+. postclose `h'
+
+. 
+. use `res', clear
+
+. 
+. * Published, ADKW Online Appendix Table A3 (fewer deaths per 100);
+. * 85 g is the paper's main window, from Table I
+. gen double pub_per100 = .
+(12 missing values generated)
+
+. local p1 2.67 1.62 1.21 1.14 0.91 0.87
+
+. local p2 2.28 1.46 1.07 1.01 0.83 0.77
+
+. local bws 30 60 85 90 120 150
+
+. forvalues o = 1/2 {
+  2.     forvalues j = 1/6 {
+  3.         local bw : word `j' of `bws'
+  4.         local v  : word `j' of `p`o''
+  5.         quietly replace pub_per100 = `v' if out_id == `o' & bw == `bw'
+  6.     }
+  7. }
+
+. 
+. gen str12 outcome_lab = cond(out_id == 1, "One year", "28 days")
+
+. gen double per100 = -100*b
+
+. gen double p_r    = 2*ttail(df_r, abs(b/se_r))
+
+. gen double p_g    = 2*ttail(df_g, abs(b/se_g))
+
+. bysort out_id (bw): gen double rel_150 = per100/per100[_N]
+
+. 
+. format per100 pub_per100 %5.2f
+
+. format se_r se_g %7.4f
+
+. format p_r p_g %5.3f
+
+. format rel_150 %4.1f
+
+. format N %9.0fc
+
+. label var outcome_lab "Outcome"
+
+. label var bw          "Window (g either side)"
+
+. label var per100      "Fewer deaths per 100, ours"
+
+. label var pub_per100  "Published"
+
+. label var se_r        "Robust SE"
+
+. label var se_g        "By gram SE"
+
+. label var p_r         "p, robust"
+
+. label var p_g         "p, by gram"
+
+. label var rel_150     "Times the 150 g estimate"
+
+. label var N           "Births"
+
+. 
+. sort out_id bw
+
+. list outcome_lab bw per100 pub_per100 rel_150 p_g, sepby(out_id) noobs abbreviate(12)
+
+  +-----------------------------------------------------------+
+  | outcome_lab    bw   per100   pub_per100   rel_150     p_g |
+  |-----------------------------------------------------------|
+  |    One year    30     2.63         2.67       3.1   0.007 |
+  |    One year    60     1.61         1.62       1.9   0.017 |
+  |    One year    85     1.21         1.21       1.4   0.028 |
+  |    One year    90     1.14         1.14       1.3   0.030 |
+  |    One year   120     0.91         0.91       1.1   0.039 |
+  |    One year   150     0.86         0.87       1.0   0.026 |
+  |-----------------------------------------------------------|
+  |     28 days    30     2.24         2.28       2.9   0.003 |
+  |     28 days    60     1.44         1.46       1.9   0.005 |
+  |     28 days    85     1.06         1.07       1.4   0.011 |
+  |     28 days    90     1.01         1.01       1.3   0.011 |
+  |     28 days   120     0.82         0.83       1.1   0.016 |
+  |     28 days   150     0.77         0.77       1.0   0.011 |
+  +-----------------------------------------------------------+
+
+. 
+. savetab outcome_lab bw per100 pub_per100 rel_150 se_r p_r se_g p_g N, ///
+>     name(table6_bandwidth) ///
+>     title("Table 6. The estimate triples as the window narrows onto the heaps") ///
+>     note("Local linear regression, triangle kernel, no controls, as in ADKW Online Appendix Table A3; the 85 g row is ADKW Table I, column 1. Negative coefficients are shown 
+> as fewer deaths per 100 babies just below 1,500 g.")
+(note: file output/tables/table6_bandwidth.csv not found)
+file output/tables/table6_bandwidth.csv saved
+(note: file output/tables/table6_bandwidth.md not found)
+  saved output/tables/table6_bandwidth.csv and output/tables/table6_bandwidth.md
+
+. 
+. *--------------------------------------------------------------
+. * Figure 5: one year estimate by window
+. *--------------------------------------------------------------
+. keep if out_id == 1 & bw != 85             // 85 g sits next to 90 g; it is in the table
+(7 observations deleted)
+
+. gen double tcrit = invttail(df_g, 0.025)
+
+. gen double lo = per100 - 100*tcrit*se_g
+
+. gen double hi = per100 + 100*tcrit*se_g
+
+. gen lab = string(per100, "%4.2f")
+
+. 
+. twoway (rcap lo hi bw, lcolor("$GREY") lwidth(medthick))                              ///
+>        (scatter per100 bw, msymbol(O) msize(large) mcolor("$NAVY")                    ///
+>             mlabel(lab) mlabposition(3) mlabcolor(black) mlabsize(small))             ///
+>        (scatter pub_per100 bw, msymbol(Dh) msize(medlarge) mcolor("$ORANGE")),        ///
+>     title("The narrower the window, the bigger the effect", color("$NAVY") size(medlarge)) ///
+>     subtitle("Fewer deaths per 100 babies within one year, local linear, no controls")     ///
+>     xtitle("Window: grams either side of 1,500 g") ytitle("Fewer deaths per 100 babies") ///
+>     xlabel(30 60 90 120 150) ylabel(, angle(0)) yline(0, lpattern(dash) lcolor("$DARK")) ///
+>     legend(order(2 "Our estimate" 3 "ADKW Online Appendix Table A3" 1 "95% range, by gram") rows(1) position(6)) ///
+>     note("Source: our reproduction from the NCHS linked birth and infant death files.")     ///
+>     graphregion(color(white)) plotregion(color(white)) scheme(s1color)
+
+. graph export "output/figures/fig5_bandwidth.png", replace width(2000)
+(note: file output/figures/fig5_bandwidth.png not found)
+(file output/figures/fig5_bandwidth.png written in PNG format)
+
+. 
+. di as text "06_bandwidth.do complete."
+06_bandwidth.do complete.
+
+. 
+end of do-file
+
+. do "code/07_placebo.do"        // placebo cutoffs, 1,000 to 3,000 g
+
+. *==============================================================
+. * 07_placebo.do : placebo cutoffs from 1,000 to 3,000 g
+. *
+. * Run the same regression discontinuity at 41 cutoffs, every 50 g
+. * from 1,000 to 3,000 g. Apart from 1,500 g (and the 1,000 g and
+. * 2,500 g definitions of extremely low and low birth weight), no
+. * rule changes care at these lines, so a sound design should find
+. * nothing there. Barreca et al. (2011, footnote 3) report lower
+. * mortality just below 37 of 41 such cutoffs.
+. *
+. * Method: deaths per baby at each recorded gram, regressed on
+. * "below the cutoff" and a trend on each side, within 85 g,
+. * weighting each gram by its births. This gives exactly the same
+. * coefficient as ADKW's OLS with no controls on the individual
+. * births (at 1,500 g: -0.0095, Table I column 2), and robust
+. * standard errors here are close to standard errors clustered by
+. * gram on the individual data.
+. *
+. * Input : data/derived/births_by_gram.dta
+. * Output: output/tables/table7_placebo.csv and .md
+. *         output/tables/table7b_placebo_summary.csv and .md
+. *         output/figures/fig6_placebo.png
+. *==============================================================
+. version 15
+
+. 
+. use "data/derived/births_by_gram.dta", clear
+(Births and infant deaths by recorded gram, 915 to 3,085 g, NCHS linked files)
+
+. collapse (sum) births deaths, by(grams)
+
+. gen double rate = deaths/births
+
+. 
+. tempname h
+
+. tempfile res
+
+. postfile `h' int cutoff double b double se double df long births int ngrams ///
+>     using `res', replace
+(note: file C:\Users\samosir1\AppData\Local\Temp\ST_3e10_000001.tmp not found)
+
+. 
+. forvalues c = 1000(50)3000 {
+  2.     capture drop below xb xa
+  3.     gen byte   below = grams < `c'
+  4.     gen double xb    = below*(grams - `c')/100
+  5.     gen double xa    = (1 - below)*(grams - `c')/100
+  6.     quietly regress rate below xb xa if abs(grams - `c') <= $WINDOW [aweight = births], vce(robust)
+  7.     local b  = _b[below]
+  8.     local se = _se[below]
+  9.     local df = e(df_r)
+ 10.     local ng = e(N)
+ 11.     quietly summarize births if abs(grams - `c') <= $WINDOW
+ 12.     post `h' (`c') (`b') (`se') (`df') (r(sum)) (`ng')
+ 13. }
+
+. postclose `h'
+
+. 
+. use `res', clear
+
+. gen double per100 = -100*b
+
+. gen double t      = b/se
+
+. gen double p      = 2*ttail(df, abs(t))
+
+. gen byte   lower_below = b < 0
+
+. gen byte   round100    = mod(cutoff, 100) == 0
+
+. gen str32  kind = cond(cutoff == 1500, "VLBW cutoff (the paper)",        ///
+>                   cond(cutoff == 1000, "ELBW cutoff (real rule)",        ///
+>                   cond(cutoff == 2500, "LBW cutoff (real rule)",         ///
+>                   cond(round100, "Round 100 g, no rule", "50 g, no rule"))))
+
+. 
+. format cutoff %5.0fc
+
+. format per100 t %6.2f
+
+. format se %7.4f
+
+. format p %5.3f
+
+. format births %12.0fc
+
+. label var cutoff      "Cutoff (g)"
+
+. label var kind        "Cutoff type"
+
+. label var per100      "Fewer deaths per 100 just below"
+
+. label var se          "Robust SE"
+
+. label var p           "p"
+
+. label var lower_below "Lower just below"
+
+. label var births      "Births in window"
+
+. 
+. list cutoff kind per100 p, noobs abbreviate(12) sep(10)
+
+  +---------------------------------------------------+
+  | cutoff                      kind   per100       p |
+  |---------------------------------------------------|
+  |  1,000   ELBW cutoff (real rule)     0.14   0.922 |
+  |  1,050             50 g, no rule    -0.98   0.316 |
+  |  1,100      Round 100 g, no rule     1.30   0.212 |
+  |  1,150             50 g, no rule    -0.23   0.722 |
+  |  1,200      Round 100 g, no rule     0.69   0.345 |
+  |  1,250             50 g, no rule    -0.11   0.772 |
+  |  1,300      Round 100 g, no rule     0.51   0.354 |
+  |  1,350             50 g, no rule     1.05   0.029 |
+  |  1,400      Round 100 g, no rule    -0.31   0.539 |
+  |  1,450             50 g, no rule     0.12   0.728 |
+  |---------------------------------------------------|
+  |  1,500   VLBW cutoff (the paper)     0.95   0.049 |
+  |  1,550             50 g, no rule    -0.06   0.766 |
+  |  1,600      Round 100 g, no rule     0.13   0.770 |
+  |  1,650             50 g, no rule     0.17   0.357 |
+  |  1,700      Round 100 g, no rule     0.32   0.150 |
+  |  1,750             50 g, no rule    -0.04   0.848 |
+  |  1,800      Round 100 g, no rule     0.72   0.002 |
+  |  1,850             50 g, no rule    -0.26   0.216 |
+  |  1,900      Round 100 g, no rule     0.15   0.195 |
+  |  1,950             50 g, no rule    -0.05   0.611 |
+  |---------------------------------------------------|
+  |  2,000      Round 100 g, no rule     0.28   0.369 |
+  |  2,050             50 g, no rule    -0.13   0.243 |
+  |  2,100      Round 100 g, no rule     0.21   0.166 |
+  |  2,150             50 g, no rule    -0.19   0.055 |
+  |  2,200      Round 100 g, no rule     0.11   0.400 |
+  |  2,250             50 g, no rule     0.18   0.010 |
+  |  2,300      Round 100 g, no rule     0.03   0.763 |
+  |  2,350             50 g, no rule     0.09   0.258 |
+  |  2,400      Round 100 g, no rule     0.04   0.570 |
+  |  2,450             50 g, no rule    -0.01   0.875 |
+  |---------------------------------------------------|
+  |  2,500    LBW cutoff (real rule)     0.07   0.563 |
+  |  2,550             50 g, no rule    -0.06   0.228 |
+  |  2,600      Round 100 g, no rule     0.04   0.412 |
+  |  2,650             50 g, no rule    -0.07   0.037 |
+  |  2,700      Round 100 g, no rule     0.13   0.000 |
+  |  2,750             50 g, no rule    -0.08   0.084 |
+  |  2,800      Round 100 g, no rule     0.05   0.032 |
+  |  2,850             50 g, no rule    -0.01   0.356 |
+  |  2,900      Round 100 g, no rule     0.03   0.082 |
+  |  2,950             50 g, no rule     0.02   0.457 |
+  |---------------------------------------------------|
+  |  3,000      Round 100 g, no rule     0.06   0.051 |
+  +---------------------------------------------------+
+
+. savetab cutoff kind per100 se p births, name(table7_placebo) ///
+>     title("Table 7. Placebo cutoffs: the same design at 41 lines from 1,000 to 3,000 g") ///
+>     note("OLS with no controls on deaths per baby at each recorded gram within 85 g of the cutoff, weighted by births, separate slopes on each side. Positive values mean fewe
+> r deaths just below the cutoff. Robust standard errors. US births 1983 to 1991 and 1995 to 2002, imputed weights dropped.")
+(note: file output/tables/table7_placebo.csv not found)
+file output/tables/table7_placebo.csv saved
+(note: file output/tables/table7_placebo.md not found)
+  saved output/tables/table7_placebo.csv and output/tables/table7_placebo.md
+
+. 
+. *--------------------------------------------------------------
+. * Summary: how often is mortality lower just below the line?
+. *--------------------------------------------------------------
+. tempname s
+
+. tempfile sum
+
+. postfile `s' str40 group int lower int total int signif using `sum', replace
+(note: file C:\Users\samosir1\AppData\Local\Temp\ST_3e10_000002.tmp not found)
+
+. quietly count if lower_below
+
+. local a = r(N)
+
+. quietly count
+
+. local t = r(N)
+
+. quietly count if lower_below & p < 0.05
+
+. post `s' ("All 41 cutoffs") (`a') (`t') (r(N))
+
+. 
+. quietly count if lower_below & round100
+
+. local a = r(N)
+
+. quietly count if round100
+
+. local t = r(N)
+
+. quietly count if lower_below & round100 & p < 0.05
+
+. post `s' ("Round 100 g cutoffs, 1,000 to 3,000 g") (`a') (`t') (r(N))
+
+. 
+. quietly count if lower_below & !round100
+
+. local a = r(N)
+
+. quietly count if !round100
+
+. local t = r(N)
+
+. quietly count if lower_below & !round100 & p < 0.05
+
+. post `s' ("Other 50 g cutoffs") (`a') (`t') (r(N))
+
+. postclose `s'
+
+. 
+. preserve
+
+. use `sum', clear
+
+. gen double share = 100*lower/total
+
+. format share %5.0f
+
+. label var group  "Cutoffs"
+
+. label var lower  "Lower just below"
+
+. label var total  "Cutoffs tested"
+
+. label var share  "Share (%)"
+
+. label var signif "Lower and significant at 5%"
+
+. list, noobs abbreviate(12)
+
+  +------------------------------------------------------------------------+
+  |                                 group   lower   total   signif   share |
+  |------------------------------------------------------------------------|
+  |                        All 41 cutoffs      26      41        6      63 |
+  | Round 100 g cutoffs, 1,000 to 3,000 g      20      21        4      95 |
+  |                    Other 50 g cutoffs       6      20        2      30 |
+  +------------------------------------------------------------------------+
+
+. savetab group lower total share signif, name(table7b_placebo_summary) ///
+>     title("Table 7b. Mortality is lower just below almost every round 100 g line") ///
+>     note("Heaps of rounded weights sit at round 100 g numbers, and the babies in them count as above the line. That makes being just below any round number look good, whether
+>  or not care changes there.")
+(note: file output/tables/table7b_placebo_summary.csv not found)
+file output/tables/table7b_placebo_summary.csv saved
+(note: file output/tables/table7b_placebo_summary.md not found)
+  saved output/tables/table7b_placebo_summary.csv and output/tables/table7b_placebo_summary.md
+
+. restore
+
+. 
+. *--------------------------------------------------------------
+. * Figure 6: placebo estimates by cutoff
+. *--------------------------------------------------------------
+. gen double lo = per100 - 196*se
+
+. gen double hi = per100 + 196*se
+
+. twoway (rcap lo hi cutoff if !round100, lcolor("$GREY"))                            ///
+>        (rcap lo hi cutoff if round100, lcolor("$BLUE"))                             ///
+>        (scatter per100 cutoff if !round100, msymbol(O) mcolor("$GREY"))             ///
+>        (scatter per100 cutoff if round100 & cutoff != 1500, msymbol(O) mcolor("$BLUE")) ///
+>        (scatter per100 cutoff if cutoff == 1500, msymbol(O) msize(large) mcolor("$ORANGE")), ///
+>     title("Being just below a round 100 g line looks good almost everywhere", color("$NAVY") size(medlarge)) ///
+>     subtitle("Fewer deaths per 100 babies just below each cutoff, within 85 g, no controls") ///
+>     xtitle("Cutoff (g)") ytitle("Fewer deaths per 100 babies")                    ///
+>     xlabel(1000(250)3000, format(%9.0fc)) ylabel(, angle(0))                       ///
+>     yline(0, lpattern(dash) lcolor("$DARK"))                                      ///
+>     legend(order(5 "1,500 g, the paper's cutoff" 4 "Other round 100 g lines" 3 "50 g lines") rows(1) position(6)) ///
+>     note("Lines: 95% ranges, robust standard errors. Source: our calculation from the NCHS linked files.") ///
+>     graphregion(color(white)) plotregion(color(white)) scheme(s1color)
+
+. graph export "output/figures/fig6_placebo.png", replace width(2000)
+(note: file output/figures/fig6_placebo.png not found)
+(file output/figures/fig6_placebo.png written in PNG format)
+
+. 
+. di as text "07_placebo.do complete."
+07_placebo.do complete.
+
+. 
+end of do-file
+
+. do "code/08_defence_checks.do" // how the result responds to the defence's fixes
+
+. *==============================================================
+. * 08_defence_checks.do : how the result responds to the defence
+. *
+. * The defenders' best replies to the heap critique, tested so our
+. * report can answer them:
+. *   drop only the 53 ounce heap at 1,503 g
+. *   drop both heaps, 1,500 g and 1,503 g
+. *   keep every birth but give rounded weights their own baseline
+. *     (indicators for 1,500 g, whole ounces and other round tens)
+. *   keep only births at exact weights, not at any round number
+. * All with ADKW's controls, one year and 28 day mortality.
+. *
+. * Output: output/tables/table8_defence_checks.csv and .md
+. *==============================================================
+. version 15
+
+. 
+. use "data/derived/analysis.dta", clear
+(ADKW (2010) sample, births 1,350 to 1,650 g, NCHS linked files)
+
+. keep if in85
+(174,330 observations deleted)
+
+. 
+. local cond1 ""
+
+. local cond2 "if grams != 1500"
+
+. local cond3 "if abs(dist) > 3"
+
+. local cond4 "if grams != 1503"
+
+. local cond5 "if grams != 1500 & grams != 1503"
+
+. local cond6 ""
+
+. local cond7 "if heaped == 0"
+
+. local extra6 "h1500 hoz h10"
+
+. local test1 "All births (ADKW)"
+
+. local test2 "Without exactly 1,500 g"
+
+. local test3 "Without 1,497 to 1,503 g"
+
+. local test4 "Without 1,503 g only (53 oz)"
+
+. local test5 "Without 1,500 g and 1,503 g"
+
+. local test6 "All births, rounding indicators"
+
+. local test7 "Exact weights only"
+
+. 
+. tempname h
+
+. tempfile res
+
+. postfile `h' byte test_id str32 test str12 outcome ///
+>     double b double se_r double se_g double df_r double df_g long N ///
+>     using `res', replace
+(note: file C:\Users\samosir1\AppData\Local\Temp\ST_3e10_000001.tmp not found)
+
+. 
+. foreach y in death_1yr death_28d {
+  2.     forvalues k = 1/7 {
+  3.         di as text "  Defence check: `test`k'', `y'"
+  4.         local xopt ""
+  5.         if "`extra`k''" != "" local xopt "extra(`extra`k'')"
+  6.         rdfit `y' `cond`k'', controls($CONTROLS) `xopt'
+  7.         post `h' (`k') ("`test`k''") ("`y'") ///
+>             (r(b)) (r(se_r)) (r(se_g)) (r(df_r)) (r(df_g)) (r(N))
+  8.     }
+  9. }
+  Defence check: All births (ADKW), death_1yr
+  Defence check: Without exactly 1,500 g, death_1yr
+  Defence check: Without 1,497 to 1,503 g, death_1yr
+  Defence check: Without 1,503 g only (53 oz), death_1yr
+  Defence check: Without 1,500 g and 1,503 g, death_1yr
+  Defence check: All births, rounding indicators, death_1yr
+  Defence check: Exact weights only, death_1yr
+  Defence check: All births (ADKW), death_28d
+  Defence check: Without exactly 1,500 g, death_28d
+  Defence check: Without 1,497 to 1,503 g, death_28d
+  Defence check: Without 1,503 g only (53 oz), death_28d
+  Defence check: Without 1,500 g and 1,503 g, death_28d
+  Defence check: All births, rounding indicators, death_28d
+  Defence check: Exact weights only, death_28d
+
+. postclose `h'
+
+. 
+. use `res', clear
+
+. gen str12 outcome_lab = cond(outcome == "death_1yr", "One year", "28 days")
+
+. gen double per100 = -100*b
+
+. gen double p_r    = 2*ttail(df_r, abs(b/se_r))
+
+. gen double p_g    = 2*ttail(df_g, abs(b/se_g))
+
+. gen double cost   = $COST/(-b) if b < 0
+
+. 
+. format per100 %5.2f
+
+. format se_r se_g %7.4f
+
+. format p_r p_g %5.3f
+
+. format cost %12.0fc
+
+. format N %9.0fc
+
+. label var outcome_lab "Outcome"
+
+. label var test        "Sample or model"
+
+. label var per100      "Fewer deaths per 100"
+
+. label var se_r        "Robust SE"
+
+. label var p_r         "p, robust"
+
+. label var se_g        "By gram SE"
+
+. label var p_g         "p, by gram"
+
+. label var cost        "Cost per life saved"
+
+. label var N           "Births"
+
+. 
+. sort outcome test_id
+
+. list outcome_lab test per100 p_r p_g cost N, sepby(outcome) noobs abbreviate(12)
+
+  +----------------------------------------------------------------------------------------------+
+  | outcome_lab                              test   per100     p_r     p_g        cost         N |
+  |----------------------------------------------------------------------------------------------|
+  |    One year                 All births (ADKW)     0.72   0.001   0.064     528,740   202,078 |
+  |    One year           Without exactly 1,500 g     0.36   0.095   0.008   1,049,928   198,534 |
+  |    One year          Without 1,497 to 1,503 g     0.18   0.493   0.315   2,055,004   175,108 |
+  |    One year      Without 1,503 g only (53 oz)     1.08   0.000   0.112     351,204   180,198 |
+  |    One year       Without 1,500 g and 1,503 g     0.28   0.281   0.153   1,349,097   176,654 |
+  |    One year   All births, rounding indicators     0.37   0.096   0.007   1,037,888   202,078 |
+  |    One year                Exact weights only     0.72   0.112   0.140     523,882    32,170 |
+  |----------------------------------------------------------------------------------------------|
+  |     28 days                 All births (ADKW)     0.71   0.000   0.022     537,769   202,078 |
+  |     28 days           Without exactly 1,500 g     0.43   0.018   0.001     880,106   198,534 |
+  |     28 days          Without 1,497 to 1,503 g     0.27   0.238   0.106   1,424,810   175,108 |
+  |     28 days      Without 1,503 g only (53 oz)     0.97   0.000   0.068     389,264   180,198 |
+  |     28 days       Without 1,500 g and 1,503 g     0.36   0.105   0.053   1,068,051   176,654 |
+  |     28 days   All births, rounding indicators     0.45   0.015   0.001     847,213   202,078 |
+  |     28 days                Exact weights only     0.69   0.071   0.073     548,891    32,170 |
+  +----------------------------------------------------------------------------------------------+
+
+. 
+. savetab outcome_lab test per100 se_r p_r se_g p_g cost N, ///
+>     name(table8_defence_checks) ///
+>     title("Table 8. How the estimate responds to the defence's fixes for rounding") ///
+>     note("ADKW's all controls regression, births within 85 g. Rounding indicators: separate intercepts for births at exactly 1,500 g, at whole ounces and at other multiples o
+> f 10 g. Exact weights: births not recorded at any of those weights. Cost per life: 3,795 dollars divided by the drop in deaths per baby, 2006 US dollars.")
+(note: file output/tables/table8_defence_checks.csv not found)
+file output/tables/table8_defence_checks.csv saved
+(note: file output/tables/table8_defence_checks.md not found)
+  saved output/tables/table8_defence_checks.csv and output/tables/table8_defence_checks.md
+
+. 
+. di as text "08_defence_checks.do complete."
+08_defence_checks.do complete.
+
+. 
+end of do-file
+
+. 
+. di as result _n "Run finished $S_DATE $S_TIME"
+
+Run finished  5 Nov 2026 18:27:07
+
+. di as text "Tables:  output/tables   Figures:  output/figures   Log:  output/logs/master_log.txt"
+Tables:  output/tables   Figures:  output/figures   Log:  output/logs/master_log.txt
+
+. log close master
+      name:  master
+       log:  C:\Users\samosir1\Downloads\ECO372_ADKW_Criticize\ECO372_ADKW_Criticize\output/logs/master_log.txt
+  log type:  text
+ closed on:   5 Nov 2026, 18:27:07
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
