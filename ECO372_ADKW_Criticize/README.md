@@ -120,7 +120,7 @@ These are the values the run should print. They come from the same data and were
 
 ## Use of AI tools
 
-[Edit before submitting.] We used Claude (Anthropic) to help write and check the Stata code and to organise the analysis. We ran the code ourselves, compared every result with the published tables, and are responsible for everything in this repository.
+We used AI to help write and check the Stata code and to organise the analysis. We ran the code ourselves, compared every result with the published tables, and are responsible for everything in this repository.
 
 ## References
 
